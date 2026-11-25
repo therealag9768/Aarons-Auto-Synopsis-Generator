@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Observation PDF Previewer (Fillable PDF Generator)</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+<style>
+body { 
+    font-family: Arial, sans-serif;
+    font-size: 22px;   
+    text-align: center;
+}
+
+#viewer {
+    position: relative;
+    border: 1px solid #ccc;
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+.page { 
+    position: relative; 
+    margin-bottom: 20px; 
+    border: 1.5px solid #ccc;
+    box-shadow: 0 0 1px rgba(0,0,0,0.05);
+}
+
+.dropdown-preview {
+    position: absolute;
+    font-size: 12px;
+    padding: 1px 2px;
+    border: 1px solid #888;
+    background: #fff;
+    width: 210px;          /* was 220 — slightly less */
+    height: 22px;
+    z-index: 2;
+    box-sizing: border-box;
+}
+
+.notes-textarea {
+    position: absolute;
+    font-size: 12px;
+    padding: 2px 4px;
+    border: 1px solid #888;
+    background: rgba(255,255,255,0.95);
+    width: 210px;          /* was 220 — slightly less */
+    height: 50px;
+    resize: vertical;
+    font-family: Arial, sans-serif;
+    line-height: 1.15;
+    z-index: 1;
+    box-sizing: border-box;
+}
+
+#xOffset, #yOffset, #vSpacing,
+label[for="xOffset"], label[for="yOffset"], label[for="vSpacing"] {
+    display: none;
+}
+
+.meta-text {
+    font-size: 12px;       
+    color: #666;           
+    font-weight: normal;
+    margin-top: -20px;       
+}
+
+.header-buttons {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 10px;
+}
+</style>
+</head>
+<body>
+<h3>Notes & Observations Fillable PDF Generator</h3>
+<div class="meta-text">- Created by Aaron Griffin -</div>
+
+<div class="header-buttons">
+    <input type="file" id="fileInput" accept="application/pdf">
+    <input type="text" id="downloadName" placeholder="Enter file name (optional)">
+    <button id="processBtn">Generate PDF</button>
+</div>
+
+<div id="viewer"></div>
+
+<datalist id="pendingOptions">
+<option value="FIXED">
+<option value="PENDING">
+<option value="UNDER REVIEW">
+<option value="REPORT AS IS">
+</datalist>
+
+<input type="number" id="xOffset" value="-72.5">
+<input type="number" id="yOffset" value="15.5">
+<input type="number" id="vSpacing" value="0">
+
+<script>
+const { PDFDocument, StandardFonts } = PDFLib;
+let pdfFile = null;
+let pendingPositions = [];
+const previewWidthInches = 8.5;
+const previewDPI = 192;
+let viewportScale = 1.0;
+
+document.getElementById("fileInput").onchange = async (e) => {
+    pdfFile = e.target.files[0];
+    if (!pdfFile) return;
+    await renderPreview();
+};
+
+async function renderPreview() {
+    const data = new Uint8Array(await pdfFile.arrayBuffer());
+    const pdf = await pdfjsLib.getDocument({ data }).promise;
+    const viewer = document.getElementById("viewer");
+    viewer.innerHTML = "";
+
+    const xOffset = parseFloat(document.getElementById("xOffset").value);
+    const yOffset = parseFloat(document.getElementById("yOffset").value);
+    const vSpacing = parseFloat(document.getElementById("vSpacing").value);
+
+    pendingPositions = [];
+
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+
+        const viewport = page.getViewport({ scale: 1.0 });
+        const pdfWidthPixels = previewWidthInches * previewDPI;
+        const scale = pdfWidthPixels / viewport.width;
+        const scaledViewport = page.getViewport({ scale: scale });
+        viewportScale = scale;
+
+        const canvas = document.createElement("canvas");
+        canvas.width = scaledViewport.width;
+        canvas.height = scaledViewport.height;
+        canvas.style.width = (scaledViewport.width / 2) + "px";
+        canvas.style.height = (scaledViewport.height / 2) + "px";
+        const ctx = canvas.getContext("2d");
+
+        const pageDiv = document.createElement("div");
+        pageDiv.className = "page";
+        pageDiv.style.width = canvas.style.width;
+        pageDiv.style.height = canvas.style.height;
+
+        pageDiv.appendChild(canvas);
+        viewer.appendChild(pageDiv);
+
+        await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise;
+
+        const textContent = await page.getTextContent();
+        let pageDropdownIndex = 0;
+
+        textContent.items.forEach(item => {
+            if (item.str.toLowerCase().includes("pending")) {
+                const [a,b,c,d,e,f] = item.transform;
+
+                const pdfX = e * scale / 2 + xOffset;
+                const pdfY = scaledViewport.height / 2 - f * scale / 2 + yOffset + pageDropdownIndex * vSpacing;
+
+                // Shift left by 10 px so the extra 20 px width is centered
+                const leftShift = 5;
+
+                const input = document.createElement("input");
+                input.setAttribute("list", "pendingOptions");
+                input.className = "dropdown-preview";
+                input.placeholder = "Select from dropdown";
+                input.style.left = (pdfX - leftShift) + "px";
+                input.style.top = pdfY + "px";
+                pageDiv.appendChild(input);
+
+                const notes = document.createElement("textarea");
+                notes.className = "notes-textarea";
+                notes.placeholder = "Type a response";
+                notes.style.left = (pdfX - leftShift) + "px";
+                notes.style.top = (pdfY + 24) + "px";
+                pageDiv.appendChild(notes);
+
+                pendingPositions.push({
+                    pageNum: pageNum - 1,
+                    x: pdfX,
+                    y: pdfY,
+                    statusEl: input,
+                    notesEl: notes
+                });
+
+                pageDropdownIndex++;
+            }
+        });
+    }
+}
+
+document.getElementById("xOffset").oninput = renderPreview;
+document.getElementById("yOffset").oninput = renderPreview;
+document.getElementById("vSpacing").oninput = renderPreview;
+
+document.getElementById("processBtn").onclick = async () => {
+    if (!pdfFile) return alert("Upload a PDF first!");
+    try {
+        const pdfBytes = await pdfFile.arrayBuffer();
+        const pdfDoc = await PDFDocument.load(pdfBytes);
+        const form = pdfDoc.getForm();
+        const pages = pdfDoc.getPages();
+
+        const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
+        const validOptions = ["FIXED", "PENDING", "UNDER REVIEW", "REPORT AS IS"];
+
+        pendingPositions.forEach((pos, i) => {
+            const page = pages[pos.pageNum];
+            const { height } = page.getSize();
+
+            const pdfX = pos.x / (viewportScale / 2);
+            const pdfY = height - (pos.y / (viewportScale / 2)) - 17;
+
+            // Shift left by ~8 points so extra width is centered
+            const pdfLeftShift = 4;
+            const pdfWidth = 158;   // was 166 — slightly less
+
+            // Status dropdown
+            const dropdown = form.createDropdown(`status_${pos.pageNum}_${i}`);
+            dropdown.addOptions(["Select from dropdown", ...validOptions]);
+            if (typeof dropdown.enableEditing === "function") dropdown.enableEditing();
+
+            const statusValue = (pos.statusEl.value || "").trim();
+            if (validOptions.includes(statusValue)) {
+                dropdown.select(statusValue);
+            } else {
+                dropdown.select("Select from dropdown");
+            }
+            dropdown.addToPage(page, { x: pdfX - pdfLeftShift, y: pdfY, width: pdfWidth, height: 18 });
+            const da = "/Helv 10 Tf 0 g";
+            dropdown.acroField.setDefaultAppearance(da);
+
+            // Notes field
+            const notesHeight = 35;
+            const notesGap = 4;
+            const notesField = form.createTextField(`notes_${pos.pageNum}_${i}`);
+            notesField.addToPage(page, {
+                x: pdfX - pdfLeftShift,
+                y: pdfY - notesHeight - notesGap,
+                width: pdfWidth,
+                height: notesHeight,
+                font: helvetica
+            });
+            notesField.enableMultiline();
+            notesField.setFontSize(10);
+            const notesValue = (pos.notesEl.value || "").trim();
+            notesField.setText(notesValue || "Type a response");
+            notesField.updateAppearances(helvetica);
+        });
+
+        const newPdfBytes = await pdfDoc.save();
+        const blob = new Blob([newPdfBytes], { type: "application/pdf" });
+
+        let originalName = pdfFile.name.replace(/\.pdf$/i, "");
+        let userName = document.getElementById("downloadName").value.trim();
+        let downloadName = userName ? userName + ".pdf" : originalName + "_fillable.pdf";
+
+        saveAs(blob, downloadName);
+    } catch (err) {
+        console.error(err);
+        alert("Generate failed: " + (err.message || err));
+    }
+};
+</script>
+</body>
+</html>
